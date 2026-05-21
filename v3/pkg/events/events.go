@@ -485,6 +485,19 @@ func newWindowsEvents() windowsEvents {
 	}
 }
 
+
+var Android = newAndroidEvents()
+
+type androidEvents struct {
+	ActivityCreated ApplicationEventType
+}
+
+func newAndroidEvents() androidEvents {
+	return androidEvents{
+		ActivityCreated: 1267,
+	}
+}
+
 var iOS = newIOSEvents()
 
 type iosEvents struct {
@@ -787,4 +800,5 @@ var eventToJS = map[uint]string{
 	1264: "ios:WebViewDidFinishNavigation",
 	1265: "ios:WebViewDidFailNavigation",
 	1266: "ios:WebViewDecidePolicyForNavigationAction",
+	1267: "android:ActivityCreated",
 }

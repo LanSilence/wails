@@ -139,6 +139,7 @@ static void executeJavaScriptOnBridge(const char* js) {
 import "C"
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -433,7 +434,7 @@ func Java_com_wails_app_WailsBridge_nativeOnPageFinished(env *C.JNIEnv, obj C.jo
 		if win != nil {
 			androidLogf("info", "🤖 [JNI] Injecting runtime.Core() into window %d", id)
 			// Get the runtime core JavaScript
-			runtimeJS := runtime.Core()
+			runtimeJS := runtime.Core(map[string]any{})
 			androidLogf("info", "🤖 [JNI] Runtime JS length: %d bytes", len(runtimeJS))
 			app.windowsLock.RUnlock()
 			// IMPORTANT: We must bypass win.ExecJS because it queues if runtimeLoaded is false.
@@ -536,27 +537,17 @@ func Java_com_wails_app_WailsBridge_nativeGetAssetMimeType(env *C.JNIEnv, obj C.
 // Helper functions
 
 func serveAssetForAndroid(app *App, path string) ([]byte, error) {
-	// Check if this is a runtime call (includes query string)
-	isRuntimeCall := strings.HasPrefix(path, "/wails/runtime")
-
-	// Normalize path for regular assets (not runtime calls)
-	if !isRuntimeCall {
-		if path == "" || path == "/" {
-			path = "/index.html"
-		}
+	if path == "" || path == "/" {
+		path = "/index.html"
 	}
-
-	// Ensure path starts with /
 	if len(path) > 0 && path[0] != '/' {
 		path = "/" + path
 	}
 
-	// Check if asset server is available
 	if app.assets == nil {
 		return nil, fmt.Errorf("asset server not initialized")
 	}
 
-	// Create a fake HTTP request
 	fullURL := "https://wails.localhost" + path
 	androidLogf("debug", "🤖 [serveAssetForAndroid] Creating request for: %s", fullURL)
 
@@ -565,33 +556,15 @@ func serveAssetForAndroid(app *App, path string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// For runtime calls (/wails/runtime), we need to add the window ID header
-	// This is required by the MessageProcessor to route the call correctly
-	if isRuntimeCall {
-		// Get the first window (on Android, there's typically only one)
-		windows := app.Window.GetAll()
-		androidLogf("debug", "🤖 [serveAssetForAndroid] Runtime call, found %d windows", len(windows))
-		if len(windows) > 0 {
-			// Use the first window's ID
-			windowID := windows[0].ID()
-			req.Header.Set("x-wails-window-id", fmt.Sprintf("%d", windowID))
-			androidLogf("debug", "🤖 [serveAssetForAndroid] Added window ID header: %d", windowID)
-		} else {
-			androidLogf("warn", "🤖 [serveAssetForAndroid] No windows available for runtime call")
-		}
-	}
-
-	// Use httptest.ResponseRecorder to capture the response
 	recorder := httptest.NewRecorder()
-
-	// Serve the request through the asset server
 	app.assets.ServeHTTP(recorder, req)
 
-	// Check response status
 	result := recorder.Result()
+	if result == nil || result.Body == nil {
+		return nil, fmt.Errorf("asset server returned nil response")
+	}
 	defer result.Body.Close()
 
-	// Read the response body
 	body, err := io.ReadAll(result.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
@@ -599,37 +572,70 @@ func serveAssetForAndroid(app *App, path string) ([]byte, error) {
 
 	androidLogf("debug", "🤖 [serveAssetForAndroid] Response status: %d, body length: %d", result.StatusCode, len(body))
 
-	// For runtime calls, we need to return the body even for error responses
-	// so the JavaScript can see the error message
-	if isRuntimeCall {
-		if result.StatusCode != http.StatusOK {
-			androidLogf("warn", "🤖 [serveAssetForAndroid] Runtime call returned status %d: %s", result.StatusCode, string(body))
-		}
-		// Return the body regardless of status - the JS will handle errors
-		return body, nil
-	}
-
-	// For regular assets, check status codes
 	if result.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("asset not found: %s", path)
 	}
-
 	if result.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("asset server error: status %d for %s", result.StatusCode, path)
 	}
-
 	return body, nil
 }
 
 func handleMessageForAndroid(app *App, message string) string {
-	// Parse the message
+	// Check if this is a window message (starts with "wails:")
+	if strings.HasPrefix(message, "wails:") {
+		if app.windows != nil {
+			for _, win := range app.windows {
+				if win != nil {
+					win.HandleMessage(message)
+					return `{"success":true}`
+				}
+			}
+		}
+		return `{"success":true}`
+	}
+
+	// Parse the message as JSON
 	var msg map[string]interface{}
 	if err := json.Unmarshal([]byte(message), &msg); err != nil {
 		return fmt.Sprintf(`{"error":"%s"}`, err.Error())
 	}
 
-	// TODO: Route to appropriate handler based on message type
-	// For now, return success
+	// Check if this is a runtime call (has object and method fields)
+	if _, ok := msg["object"]; ok {
+		if _, ok := msg["method"]; ok {
+			// This is a runtime call - route to message processor
+			var req RuntimeRequest
+			if err := json.Unmarshal([]byte(message), &req); err != nil {
+				return fmt.Sprintf(`{"error":"%s"}`, err.Error())
+			}
+
+			// Check if message processor is available
+			if app.messageProcessor == nil {
+				return `{"error":"Message processor not initialized"}`
+			}
+
+			// Handle the runtime call
+			ctx := context.Background()
+			androidLogf("debug", "🤖 handleMessage calling HandleRuntimeCallWithIDs object=%d method=%d", req.Object, req.Method)
+			resp, err := app.messageProcessor.HandleRuntimeCallWithIDs(ctx, &req)
+			if err != nil {
+				androidLogf("error", "🤖 handleMessage error: %v", err)
+				return fmt.Sprintf(`{"error":"%s"}`, err.Error())
+			}
+
+			// Convert response to JSON
+			respJSON, err := json.Marshal(resp)
+			if err != nil {
+				androidLogf("error", "🤖 handleMessage marshal error: %v", err)
+				return fmt.Sprintf(`{"error":"%s"}`, err.Error())
+			}
+			androidLogf("debug", "🤖 handleMessage response: %s", string(respJSON))
+			return string(respJSON)
+		}
+	}
+
+	// Default: return success
 	return `{"success":true}`
 }
 
