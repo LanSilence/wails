@@ -67,6 +67,7 @@ func New(appOptions Options) *App {
 	result.customEventProcessor = NewWailsEventProcessor(result.Event.dispatch)
 
 	messageProc := NewMessageProcessor(result.Logger)
+	result.messageProcessor = messageProc
 
 	// Initialize transport (default to HTTP if not specified)
 	transport := appOptions.Transport
@@ -417,6 +418,9 @@ type App struct {
 	// Wails ApplicationEvent Listener related
 	wailsEventListenerLock sync.Mutex
 	wailsEventListeners    []WailsEventListener
+
+	// Message processor for handling runtime calls
+	messageProcessor *MessageProcessor
 
 	// singleInstanceManager handles single instance functionality
 	singleInstanceManager *singleInstanceManager

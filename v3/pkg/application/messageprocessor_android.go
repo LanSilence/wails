@@ -43,6 +43,9 @@ func (m *MessageProcessor) processAndroidMethod(req *RuntimeRequest, window Wind
 	}
 }
 
+// iosMethodNames is a stub on Android (iOS methods not available)
+var iosMethodNames = map[int]string{}
+
 // processIOSMethod is a stub on Android
 func (m *MessageProcessor) processIOSMethod(req *RuntimeRequest, window Window) (any, error) {
 	return nil, errs.NewInvalidIOSCallErrorf("iOS methods not available on Android")
